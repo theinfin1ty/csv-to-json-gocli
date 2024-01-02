@@ -2,12 +2,14 @@ package main
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type InputFile struct {
@@ -118,8 +120,92 @@ func processCsvFile(fileData InputFile, writerChannel chan<- map[string]string) 
 	}
 }
 
+func createStringWriter(csvPath string) func(string, bool) {
+	jsonDir := filepath.Dir(csvPath)
+	jsonName := fmt.Sprintf("%s.json", strings.TrimSuffix(filepath.Base(csvPath), ".csv"))
+	finalLocation := filepath.Join(jsonDir, jsonName)
+
+	f, err := os.Create(finalLocation)
+	check(err)
+
+	return func(data string, close bool) {
+		_, err := f.WriteString(data)
+		check(err)
+
+		if close {
+			f.Close()
+		}
+	}
+}
+
+func getJSONFunc(pretty bool) (func(map[string]string) string, string) {
+	var jsonFunc func(map[string]string) string
+	var breakLine string
+
+	if pretty {
+		breakLine = "\n"
+		jsonFunc = func(record map[string]string) string {
+			jsonData, _ := json.MarshalIndent(record, "  ", "  ")
+			return "  " + string(jsonData)
+		}
+	} else {
+		breakLine = ""
+		jsonFunc = func(record map[string]string) string {
+			jsonData, _ := json.Marshal(record)
+			return string(jsonData)
+		}
+	}
+	return jsonFunc, breakLine
+}
+
+func writeJSONFile(csvPath string, writerChannel <-chan map[string]string, done chan<- bool, pretty bool) {
+	writeString := createStringWriter(csvPath)
+	jsonFunc, breakLine := getJSONFunc(pretty)
+	fmt.Println("Writing JSON file...")
+	writeString("["+breakLine, false)
+	first := true
+
+	for {
+		record, more := <-writerChannel
+		if more {
+			if !first {
+				writeString(","+breakLine, false)
+			} else {
+				first = false
+			}
+			jsonData := jsonFunc(record)
+			writeString(jsonData, false)
+		} else {
+			writeString(breakLine+"]", true)
+			fmt.Println("Completed!")
+			done <- true
+			break
+		}
+	}
+}
+
 func main() {
+	flag.Usage = func() {
+		fmt.Printf("Usage: %s [options] <csv file>\noptions:\n", os.Args[0])
+		flag.PrintDefaults()
+	}
 	fileData, err := getFileData()
 
-	fmt.Println(fileData, err)
+	if err != nil {
+		exitGracefully(err)
+	}
+
+	_, err = checkIfValidFile(fileData.filePath)
+
+	if err != nil {
+		exitGracefully(err)
+	}
+
+	writerChannel := make(chan map[string]string)
+	done := make(chan bool)
+
+	go processCsvFile(fileData, writerChannel)
+	go writeJSONFile(fileData.filePath, writerChannel, done, fileData.pretty)
+
+	<-done
 }
